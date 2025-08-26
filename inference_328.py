@@ -22,6 +22,8 @@ parser.add_argument('--name', type=str, default="May")
 parser.add_argument('--audio_path', type=str, default="demo/talk_hb.wav")
 parser.add_argument('--start_frame', type=int, default=0)
 parser.add_argument('--parsing', type=bool, default=False)
+parser.add_argument('--debug_windowing', action='store_true', 
+                   help='Print debugging info about audio windowing (shows first/last 5 frames)')
 args = parser.parse_args()
 
 checkpoint_path = os.path.join("./checkpoint", args.name)
@@ -50,6 +52,20 @@ outputs = torch.cat(outputs, dim=0).cpu()
 first_frame, last_frame = outputs[:1], outputs[-1:]
 audio_feats = torch.cat([first_frame.repeat(1, 1), outputs, last_frame.repeat(1, 1)],
                             dim=0).numpy()
+
+print(f"\n[Audio Windowing] Generated audio features shape: {audio_feats.shape}")
+print(f"[Audio Windowing] Each video frame will use a 16-frame audio window")
+print(f"[Audio Windowing] Total frames to generate: {audio_feats.shape[0]}")
+if args.debug_windowing:
+    print(f"[Audio Windowing] Window ranges will be:")
+    print(f"  Frame 0: [{-8}:{8}] (with zero padding)")
+    print(f"  Frame 1: [{-7}:{9}]")
+    print(f"  Frame 2: [{-6}:{10}]")
+    print(f"  ...")
+    print(f"  Frame {audio_feats.shape[0]-3}: [{audio_feats.shape[0]-11}:{audio_feats.shape[0]+5}]")
+    print(f"  Frame {audio_feats.shape[0]-2}: [{audio_feats.shape[0]-10}:{audio_feats.shape[0]+6}]")
+    print(f"  Frame {audio_feats.shape[0]-1}: [{audio_feats.shape[0]-9}:{audio_feats.shape[0]+7}] (with zero padding)")
+print()
 img_dir = os.path.join(dataset_dir, "full_body_img/")
 lms_dir = os.path.join(dataset_dir, "landmarks/")
 len_img = len(os.listdir(img_dir)) - 1
@@ -68,6 +84,13 @@ img_idx = 0
 net = Model(6, mode).cuda()
 net.load_state_dict(torch.load(checkpoint))
 net.eval()
+
+# Show windowing debug info for first few and last few frames
+debug_frames = set()
+if args.debug_windowing:
+    debug_frames.update(range(5))  # First 5 frames
+    debug_frames.update(range(max(0, audio_feats.shape[0]-5), audio_feats.shape[0]))  # Last 5 frames
+
 for i in tqdm(range(audio_feats.shape[0])):
     if img_idx>len_img - 1:
         step_stride = -1
@@ -120,7 +143,8 @@ for i in tqdm(range(audio_feats.shape[0])):
     img_masked_T = torch.from_numpy(img_masked / 255.0)
     img_concat_T = torch.cat([img_real_ex_T, img_masked_T], axis=0)[None]
     
-    audio_feat = get_audio_features(audio_feats, i)
+    # Extract 16-frame audio window for this frame
+    audio_feat = get_audio_features(audio_feats, i, verbose=(i in debug_frames))
     if mode=="hubert":
         audio_feat = audio_feat.reshape(32,32,32)
     if mode=="wenet":
@@ -157,3 +181,9 @@ video_writer.release()
 os.system(f"ffmpeg -i {save_path.replace('.mp4', 'temp.mp4')} -i {audio_path} -c:v libx264 -c:a aac -crf 20 {save_path} -y")
 os.system(f"rm {save_path.replace('.mp4', 'temp.mp4')}")
 print(f"[INFO] ===== save video to {save_path} =====")
+print(f"\n[Audio Windowing Summary]")
+print(f"The system processed {audio_feats.shape[0]} video frames")
+print(f"Each frame used a 16-frame audio window (±8 frames)")
+print(f"Total audio windows overlapped ~94% with adjacent windows")
+print(f"This sliding window approach provides temporal context without")
+print(f"loading the entire audio file into memory for each frame.")
