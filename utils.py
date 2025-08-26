@@ -63,17 +63,36 @@ class AudioEncoder(nn.Module):
 
         return out
     
-def get_audio_features(features, index):
+def get_audio_features(features, index, verbose=False):
+    """
+    Extract a 16-frame audio window centered around the given index.
+    
+    Args:
+        features: Audio features array of shape [total_frames, feature_dim]
+        index: Center frame index for the window
+        verbose: If True, print debugging information about windowing
+    
+    Returns:
+        auds: 16-frame audio window as torch tensor
+    """
     left = index - 8
     right = index + 8
     pad_left = 0
     pad_right = 0
+    
+    # Handle boundary conditions with padding
     if left < 0:
         pad_left = -left
         left = 0
     if right > features.shape[0]:
         pad_right = right - features.shape[0]
         right = features.shape[0]
+    
+    if verbose:
+        print(f"Frame {index}: Audio window [{left}:{right}] "
+              f"(pad_left={pad_left}, pad_right={pad_right}) "
+              f"from total {features.shape[0]} frames")
+    
     auds = torch.from_numpy(features[left:right])
     if pad_left > 0:
         auds = torch.cat([torch.zeros_like(auds[:pad_left]), auds], dim=0)
@@ -122,22 +141,46 @@ def _normalize(S):
 
 class AudDataset(object):
     def __init__(self, wavpath):
+        """
+        Initialize audio dataset for sliding window processing.
+        
+        The audio file is processed into mel-spectrograms but NOT loaded entirely 
+        into memory for frame generation. Instead, frame generation uses windowed
+        access to extract temporal chunks as needed.
+        """
         wav = load_wav(wavpath, 16000)
 
         self.orig_mel = melspectrogram(wav).T
+        # Calculate how many video frames can be generated from this audio
+        # Formula accounts for 16-frame window requirement and frame rate conversion
         self.data_len = int((self.orig_mel.shape[0] - 16) / 80. * float(25)) + 2
+        
+        print(f"[Audio Processing] Loaded audio: {wavpath}")
+        print(f"[Audio Processing] Audio duration: {len(wav)/16000:.2f}s")
+        print(f"[Audio Processing] Mel-spectrogram shape: {self.orig_mel.shape}")
+        print(f"[Audio Processing] Will generate {self.data_len} video frames")
+        print(f"[Audio Processing] Using 16-frame sliding windows (±8 frames per output)")
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
 
     def crop_audio_window(self, spec, start_frame):
+        """
+        Extract a 16-frame window from the mel-spectrogram for a given video frame.
+        
+        This is the core windowing function that extracts temporal audio chunks
+        rather than using the entire audio file at once.
+        """
         if type(start_frame) == int:
             start_frame_num = start_frame
         else:
             start_frame_num = self.get_frame_id(start_frame)
+        
+        # Convert video frame number to mel-spectrogram index
+        # 80 is the hop size factor, 25 is fps
         start_idx = int(80. * (start_frame_num / float(25)))
 
-        end_idx = start_idx + 16
+        end_idx = start_idx + 16  # 16-frame window
         if end_idx > spec.shape[0]:
             # print(end_idx, spec.shape[0])
             end_idx = spec.shape[0]
@@ -149,7 +192,13 @@ class AudDataset(object):
         return self.data_len
 
     def __getitem__(self, idx):
-
+        """
+        Get a 16-frame mel-spectrogram window for a specific video frame.
+        
+        This method demonstrates the windowing approach: instead of returning
+        the entire audio file, it returns only a small temporal window of
+        audio features needed for generating one video frame.
+        """
         mel = self.crop_audio_window(self.orig_mel.copy(), idx)
         if (mel.shape[0] != 16):
             raise Exception('mel.shape[0] != 16')
